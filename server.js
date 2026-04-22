@@ -4,15 +4,16 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 
 // 1. INITIALIZE FIREBASE
-// Note: You need to download your serviceAccountKey.json from Firebase Console
+// Ensure serviceAccountKey.json is in the same folder as this file
 const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://garbage-monitoring-23b5d-default-rtdb.firebaseio.com" // Replace with your Firebase DB URL
+  databaseURL: "https://garbage-monitoring-23b5d-default-rtdb.firebaseio.com" 
 });
 
-const db = admin.firestore(); // Using Firestore for better location queries
+// Initialize Realtime Database
+const db = admin.database(); 
 const app = express();
 
 app.use(cors());
@@ -21,43 +22,42 @@ app.use(express.static("public"));
 
 // 2. API TO RECEIVE DATA FROM ESP32
 app.post("/alert", async (req, res) => {
+    // Destructuring keys sent by ESP32
     const { binId, fillLevel, status, lat, lng } = req.body;
     const currentTime = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
 
     try {
-        // Fetch current bin data to check if status is changing
-        const binRef = db.collection("bins").doc(binId);
-        const doc = await binRef.get();
-        let filledAtTime = "Not yet full";
+        // Reference to the specific bin path in Realtime DB
+        const binRef = db.ref("bins/" + binId);
+        
+        // Fetch current data to check the previous status
+        const snapshot = await binRef.once("value");
+        const existingData = snapshot.val() || {};
+        
+        let filledAtTime = existingData.filledAt || "Not yet full";
 
-        if (doc.exists) {
-            const data = doc.data();
-            filledAtTime = data.filledAt || "Not yet full";
-            
-            // Logic: If it just became full, update the 'filledAt' timestamp
-            if (status === "Full" && data.status !== "Full") {
-                filledAtTime = currentTime;
-            } else if (status === "OK") {
-                filledAtTime = "Cleared";
-            }
-        } else if (status === "Full") {
+        // Logic: Capture exact time it becomes FULL
+        if (status === "Full" && existingData.status !== "Full") {
             filledAtTime = currentTime;
+        } else if (status === "OK") {
+            filledAtTime = "Cleared";
         }
 
-        // Save/Update in Firebase
+        // Prepare the updated data object
         const binData = {
-            binId,
-            fillLevel,
-            status,
+            binId: binId || "Unknown_Bin",
+            fillLevel: fillLevel || 0,
+            status: status || "Unknown",
             lat: lat || 17.3850,
             lng: lng || 78.4867,
             filledAt: filledAtTime,
             lastSeen: currentTime
         };
 
-        await binRef.set(binData, { merge: true });
+        // Save/Update in Realtime Database
+        await binRef.set(binData);
         
-        console.log(`✅ Data synced to Firebase for ${binId}`);
+        console.log(`✅ Realtime DB Synced for ${binId}: ${fillLevel}%`);
         res.json({ success: true });
     } catch (error) {
         console.error("❌ Firebase Error:", error);
@@ -68,13 +68,21 @@ app.post("/alert", async (req, res) => {
 // 3. API FOR DASHBOARD TO GET DATA
 app.get("/api/bins", async (req, res) => {
     try {
-        const snapshot = await db.collection("bins").get();
-        const bins = snapshot.docs.map(doc => doc.data());
-        res.json(bins);
+        const snapshot = await db.ref("bins").once("value");
+        const binsObj = snapshot.val() || {};
+        
+        // Realtime DB returns an object of objects. 
+        // We convert it to an array so the Frontend map/table can loop through it.
+        const binsArray = Object.values(binsObj);
+        res.json(binsArray);
     } catch (error) {
+        console.error("❌ Fetch Error:", error);
         res.status(500).json({ error: error.message });
     }
 });
 
+// Start Server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+});
