@@ -1,88 +1,122 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const cors = require("cors");
-const admin = require("firebase-admin");
+// ============================================================
+//  EcoTrack Backend — server.js
+//  FIXED VERSION — env-var credentials + error hardening
+// ============================================================
+
+const express     = require("express");
+const bodyParser  = require("body-parser");
+const cors        = require("cors");
+const admin       = require("firebase-admin");
 
 // 1. INITIALIZE FIREBASE
-// Ensure serviceAccountKey.json is in the same folder as this file
-const serviceAccount = require("./serviceAccountKey.json");
+//    FIX BUG 3: Support both local (serviceAccountKey.json) and
+//    Render (environment variables) so the server never crashes on deploy.
+let credential;
+
+if (
+  process.env.FIREBASE_PROJECT_ID &&
+  process.env.FIREBASE_CLIENT_EMAIL &&
+  process.env.FIREBASE_PRIVATE_KEY
+) {
+  // Production on Render: use env vars (add these in Render → Environment)
+  credential = admin.credential.cert({
+    projectId:   process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    // Render stores \n as literal \\n in env vars — this fixes the key
+    privateKey:  process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  });
+  console.log("🔑 Firebase: using environment variables");
+} else {
+  // Local development: use the JSON key file
+  const serviceAccount = require("./serviceAccountKey.json");
+  credential = admin.credential.cert(serviceAccount);
+  console.log("🔑 Firebase: using serviceAccountKey.json");
+}
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://garbage-b1af2-default-rtdb.firebaseio.com/" 
+  credential,
+  databaseURL: "https://garbage-b1af2-default-rtdb.firebaseio.com/",
 });
 
-// Initialize Realtime Database
-const db = admin.database(); 
+const db  = admin.database();
 const app = express();
 
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static("public"));
 
-// 2. API TO RECEIVE DATA FROM ESP32
+// -------------------------------------------------------
+//  POST /alert  — receive data from ESP32
+// -------------------------------------------------------
 app.post("/alert", async (req, res) => {
-    // Destructuring keys sent by ESP32
-    const { binId, fillLevel, status, lat, lng } = req.body;
-    const currentTime = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+  const { binId, fillLevel, status, lat, lng } = req.body;
 
-    try {
-        // Reference to the specific bin path in Realtime DB
-        const binRef = db.ref("bins/" + binId);
-        
-        // Fetch current data to check the previous status
-        const snapshot = await binRef.once("value");
-        const existingData = snapshot.val() || {};
-        
-        let filledAtTime = existingData.filledAt || "Not yet full";
+  // Basic validation — reject incomplete payloads
+  if (!binId || fillLevel === undefined || !status) {
+    return res.status(400).json({ error: "Missing required fields: binId, fillLevel, status" });
+  }
 
-        // Logic: Capture exact time it becomes FULL
-        if (status === "Full" && existingData.status !== "Full") {
-            filledAtTime = currentTime;
-        } else if (status === "OK") {
-            filledAtTime = "Cleared";
-        }
+  const currentTime = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
 
-        // Prepare the updated data object
-        const binData = {
-            binId: binId || "Unknown_Bin",
-            fillLevel: fillLevel || 0,
-            status: status || "Unknown",
-            lat: lat || 17.3850,
-            lng: lng || 78.4867,
-            filledAt: filledAtTime,
-            lastSeen: currentTime
-        };
+  try {
+    const binRef = db.ref("bins/" + binId);
 
-        // Save/Update in Realtime Database
-        await binRef.set(binData);
-        
-        console.log(`✅ Realtime DB Synced for ${binId}: ${fillLevel}%`);
-        res.json({ success: true });
-    } catch (error) {
-        console.error("❌ Firebase Error:", error);
-        res.status(500).json({ error: error.message });
+    // Fetch current data to check previous status
+    const snapshot     = await binRef.once("value");
+    const existingData = snapshot.val() || {};
+
+    let filledAtTime = existingData.filledAt || "Not yet full";
+
+    // Capture exact IST time the bin first becomes full
+    if (status === "Full" && existingData.status !== "Full") {
+      filledAtTime = currentTime;
+    } else if (status === "OK") {
+      filledAtTime = "Cleared";
     }
+
+    const binData = {
+      binId:      binId,
+      fillLevel:  fillLevel,
+      status:     status,
+      lat:        lat  || 17.3850,   // fallback to Hussain Sagar
+      lng:        lng  || 78.4867,
+      filledAt:   filledAtTime,
+      lastSeen:   currentTime,
+    };
+
+    await binRef.set(binData);
+
+    console.log(`✅ DB synced — ${binId}: ${fillLevel}% (${status})`);
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error("❌ Firebase Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 3. API FOR DASHBOARD TO GET DATA
+// -------------------------------------------------------
+//  GET /api/bins  — serve bin data to dashboard
+// -------------------------------------------------------
 app.get("/api/bins", async (req, res) => {
-    try {
-        const snapshot = await db.ref("bins").once("value");
-        const binsObj = snapshot.val() || {};
-        
-        // Realtime DB returns an object of objects. 
-        // We convert it to an array so the Frontend map/table can loop through it.
-        const binsArray = Object.values(binsObj);
-        res.json(binsArray);
-    } catch (error) {
-        console.error("❌ Fetch Error:", error);
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const snapshot = await db.ref("bins").once("value");
+    const binsObj  = snapshot.val() || {};
+    const binsArray = Object.values(binsObj);
+    res.json(binsArray);
+  } catch (error) {
+    console.error("❌ Fetch Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// Start Server
+// Health check endpoint (useful for Render uptime monitoring)
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", time: new Date().toISOString() });
+});
+
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 EcoTrack server running on port ${PORT}`);
 });

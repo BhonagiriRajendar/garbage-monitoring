@@ -8,32 +8,43 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body { background: #f4f7f6; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .sidebar { height: 100vh; background: #2c3e50; color: white; padding: 20px; }
+        .sidebar { height: 100vh; background: #2c3e50; color: white; padding: 20px; overflow-y: auto; }
         #map { height: 500px; width: 100%; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
         .status-card { border: none; border-radius: 12px; transition: 0.3s; }
         .badge-full { background-color: #e74c3c; color: white; }
-        .badge-ok { background-color: #2ecc71; color: white; }
+        .badge-ok   { background-color: #2ecc71; color: white; }
+        #connection-status { font-size: 0.75rem; margin-top: 8px; }
+        .dot-live   { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #2ecc71; margin-right: 4px; animation: pulse 1.5s infinite; }
+        .dot-error  { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #e74c3c; margin-right: 4px; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
     </style>
 </head>
 <body>
 
 <div class="container-fluid">
     <div class="row">
+
+        <!-- Sidebar -->
         <div class="col-md-3 sidebar">
             <h3>♻️ EcoTrack</h3>
             <hr>
             <div id="stat-summary">
                 <p>Total Bins: <span id="total-bins">0</span></p>
-                <p>Critical Alerts: <span id="full-bins" class="text-danger">0</span></p>
+                <p>Critical Alerts: <span id="full-bins" class="text-danger fw-bold">0</span></p>
+            </div>
+            <div id="connection-status">
+                <span class="dot-live" id="status-dot"></span>
+                <span id="status-text">Connecting…</span>
             </div>
             <hr>
             <h5>Live Logs</h5>
             <div id="log-list" style="font-size: 0.8rem; max-height: 400px; overflow-y: auto;"></div>
         </div>
 
+        <!-- Main content -->
         <div class="col-md-9 p-4">
             <h2 class="mb-4">Real-Time Monitoring Dashboard</h2>
-            
+
             <div id="map" class="mb-4"></div>
 
             <div class="card shadow-sm border-0">
@@ -42,75 +53,104 @@
                         <thead class="table-light">
                             <tr>
                                 <th>Bin ID</th>
-                                <th>Location (Lat/Lng)</th>
+                                <th>Location (Lat / Lng)</th>
                                 <th>Fill Level</th>
                                 <th>Status</th>
                                 <th>Time Filled</th>
+                                <th>Last Seen</th>
                             </tr>
                         </thead>
                         <tbody id="bin-table-body">
-                            </tbody>
+                            <tr id="empty-row">
+                                <td colspan="6" class="text-center text-muted py-4">Waiting for bin data…</td>
+                            </tr>
+                        </tbody>
                     </table>
                 </div>
             </div>
         </div>
+
     </div>
 </div>
-<script type="module">
-  // Import the functions you need from the SDKs you need
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
-  import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-analytics.js";
-  // TODO: Add SDKs for Firebase products that you want to use
-  // https://firebase.google.com/docs/web/setup#available-libraries
 
-  // Your web app's Firebase configuration
-  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
-  const firebaseConfig = {
-    apiKey: "AIzaSyC6o8u_zAnSpgLDN79bu6bL-MGoFwJ_jMY",
-    authDomain: "garbage-b1af2.firebaseapp.com",
-    projectId: "garbage-b1af2",
-    storageBucket: "garbage-b1af2.firebasestorage.app",
-    messagingSenderId: "505390501308",
-    appId: "1:505390501308:web:c392e8b0ec4c1abe6f6fb9",
-    measurementId: "G-NKS0ZFRGCF"
-  };
+<!--
+    FIX BUG 5: Removed the unused Firebase JS SDK <script type="module"> block.
+    The dashboard fetches data through Express /api/bins — no client-side
+    Firebase SDK is needed here.
+-->
 
-  // Initialize Firebase
-  const app = initializeApp(firebaseConfig);
-  const analytics = getAnalytics(app);
-</script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-    var map = L.map('map').setView([17.3850, 78.4867], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-    var markers = {};
+    // Initialise Leaflet map centred on Hussain Sagar, Hyderabad
+    var map = L.map('map').setView([17.3850, 78.4867], 14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
 
+    var markers = {};   // cache of binId → Leaflet marker
+
+    // Custom icons so Full bins show red and OK bins show green
+    var iconGreen = L.icon({
+        iconUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-icon-green.png',
+        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+        iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34]
+    });
+    var iconRed = L.icon({
+        iconUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-icon-red.png',
+        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+        iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34]
+    });
+
+    // -------------------------------------------------------
+    //  fetchData — polls /api/bins and refreshes UI
+    // -------------------------------------------------------
     async function fetchData() {
         try {
             const response = await fetch('/api/bins');
+
+            if (!response.ok) {
+                throw new Error('Server returned ' + response.status);
+            }
+
             const bins = await response.json();
-            
-            let tableHtml = '';
-            let logHtml = '';
-            let fullCount = 0;
+
+            // Update connection indicator
+            document.getElementById('status-dot').className = 'dot-live';
+            document.getElementById('status-text').textContent = 'Live';
+
+            let tableHtml  = '';
+            let logHtml    = '';
+            let fullCount  = 0;
+
+            if (bins.length === 0) {
+                tableHtml = '<tr><td colspan="6" class="text-center text-muted py-4">No bin data yet. Start your simulation.</td></tr>';
+            }
 
             bins.forEach(bin => {
-                const statusClass = bin.status === 'Full' ? 'badge-full' : 'badge-ok';
-                if(bin.status === 'Full') fullCount++;
+                const isFull      = bin.status === 'Full';
+                const statusClass = isFull ? 'badge-full' : 'badge-ok';
+                if (isFull) fullCount++;
 
-                // 1. Update Map
+                // --- Update map marker ---
+                var markerIcon = isFull ? iconRed : iconGreen;
                 if (markers[bin.binId]) {
                     markers[bin.binId].setLatLng([bin.lat, bin.lng]);
+                    markers[bin.binId].setIcon(markerIcon);
                 } else {
-                    markers[bin.binId] = L.marker([bin.lat, bin.lng]).addTo(map);
+                    markers[bin.binId] = L.marker([bin.lat, bin.lng], { icon: markerIcon }).addTo(map);
                 }
-                markers[bin.binId].bindPopup(`<b>${bin.binId}</b><br>Level: ${bin.fillLevel}%`);
+                markers[bin.binId].bindPopup(
+                    `<b>${bin.binId}</b><br>
+                     Fill level: <b>${bin.fillLevel}%</b><br>
+                     Status: <b>${bin.status}</b><br>
+                     <small>Last seen: ${bin.lastSeen}</small>`
+                );
 
-                // 2. Build Table
+                // --- Build table row ---
                 tableHtml += `
-                    <tr>
+                    <tr class="${isFull ? 'table-danger' : ''}">
                         <td><b>${bin.binId}</b></td>
-                        <td><small>${bin.lat.toFixed(4)}, ${bin.lng.toFixed(4)}</small></td>
+                        <td><small>${Number(bin.lat).toFixed(4)}, ${Number(bin.lng).toFixed(4)}</small></td>
                         <td>
                             <div class="progress" style="height: 10px; width: 100px;">
                                 <div class="progress-bar" style="width: ${bin.fillLevel}%; background-color: ${bin.fillLevel > 80 ? '#e74c3c' : '#2ecc71'}"></div>
@@ -118,23 +158,38 @@
                             <small>${bin.fillLevel}%</small>
                         </td>
                         <td><span class="badge ${statusClass}">${bin.status}</span></td>
-                        <td><small>${bin.filledAt}</small></td>
+                        <td><small>${bin.filledAt || '—'}</small></td>
+                        <td><small>${bin.lastSeen || '—'}</small></td>
                     </tr>`;
-                
-                logHtml += `<div class="mb-2 border-bottom border-secondary pb-1">
-                    <span class="text-info">${bin.binId}</span>: ${bin.status}<br>
-                    <small class="text-muted">${bin.lastSeen}</small>
-                </div>`;
+
+                // --- Build sidebar log ---
+                logHtml += `
+                    <div class="mb-2 border-bottom border-secondary pb-1">
+                        <span class="text-info">${bin.binId}</span>:
+                        <span class="${isFull ? 'text-danger fw-bold' : 'text-success'}">${bin.status}</span>
+                        — ${bin.fillLevel}%<br>
+                        <small class="text-muted">${bin.lastSeen}</small>
+                    </div>`;
             });
 
             document.getElementById('bin-table-body').innerHTML = tableHtml;
-            document.getElementById('log-list').innerHTML = logHtml;
-            document.getElementById('total-bins').innerText = bins.length;
-            document.getElementById('full-bins').innerText = fullCount;
+            document.getElementById('log-list').innerHTML        = logHtml;
+            document.getElementById('total-bins').innerText      = bins.length;
+            document.getElementById('full-bins').innerText       = fullCount;
 
-        } catch (err) { console.error("Error fetching bins:", err); }
+        } catch (err) {
+            console.error("Error fetching bins:", err);
+            // Show offline indicator
+            document.getElementById('status-dot').className   = 'dot-error';
+            document.getElementById('status-text').textContent = 'Connection error';
+        }
     }
 
+    // FIX BUG 6: Call fetchData immediately on page load so the map
+    // and table are populated straight away (not after the first 3-second delay).
+    fetchData();
+
+    // Then keep polling every 3 seconds
     setInterval(fetchData, 3000);
 </script>
 </body>
