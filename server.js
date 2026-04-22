@@ -35,7 +35,7 @@ if (
 
 admin.initializeApp({
   credential,
-  databaseURL: "https://garbage-b1af2-default-rtdb.firebaseio.com/",
+  databaseURL: "https://garbage-b1af2-default-rtdb.firebaseio.com",
 });
 
 const db  = admin.database();
