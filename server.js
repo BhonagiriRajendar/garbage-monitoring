@@ -9,7 +9,7 @@ const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://garbage-monitoring-23b5d-default-rtdb.firebaseio.com" 
+  databaseURL: "https://garbage-b1af2-default-rtdb.firebaseio.com/" 
 });
 
 // Initialize Realtime Database
